@@ -1,0 +1,7 @@
+{
+  "name": "magister-juridico",
+  "version": "1.0.0",
+  "description": "Magister AI — Gestão Jurídica",
+  "private": true,
+  "engines": { "node": ">=18" }
+}
