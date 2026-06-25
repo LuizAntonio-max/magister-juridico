@@ -1,8 +1,5 @@
-Aqui está o conteúdo completo do `buscar.js` — selecione tudo e copie:
-
-```javascript
 // Vercel Serverless Function — /api/buscar.js
-// Integração real com Escavador API
+// Integração real com Escavador API — busca todas as páginas
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -24,41 +21,48 @@ export default async function handler(req, res) {
   };
 
   try {
-    let url = '';
+    let todosProcessos = [];
+    let pagina = 1;
+    let totalPaginas = 1;
 
-    if (tipo === 'oab') {
-      url = `https://api.escavador.com/api/v2/advogado/processos?oab_numero=${encodeURIComponent(valor)}&oab_estado=${encodeURIComponent(uf || 'SP')}`;
-    } else if (tipo === 'advogado') {
-      url = `https://api.escavador.com/api/v2/advogado/processos?nome=${encodeURIComponent(valor)}`;
-    } else if (tipo === 'numero') {
-      url = `https://api.escavador.com/api/v2/processos/numero_unico/${encodeURIComponent(valor)}`;
-    } else if (tipo === 'parte') {
-      url = `https://api.escavador.com/api/v2/processos/envolvido?nome=${encodeURIComponent(valor)}`;
-    } else {
-      return res.status(400).json({ error: 'Tipo de busca inválido' });
-    }
-
-    const response = await fetch(url, { headers });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      return res.status(response.status).json({ error: `Escavador: ${response.status} — ${errText}` });
-    }
-
-    const data = await response.json();
-
-    let processos = [];
-
-    if (tipo === 'numero') {
-      if (data && data.numero_unico) {
-        processos = [normalizarProcesso(data)];
+    do {
+      let url = '';
+      if (tipo === 'oab') {
+        url = `https://api.escavador.com/api/v2/advogado/processos?oab_numero=${encodeURIComponent(valor)}&oab_estado=${encodeURIComponent(uf || 'SP')}&page=${pagina}&limit=50`;
+      } else if (tipo === 'advogado') {
+        url = `https://api.escavador.com/api/v2/advogado/processos?nome=${encodeURIComponent(valor)}&page=${pagina}&limit=50`;
+      } else if (tipo === 'numero') {
+        url = `https://api.escavador.com/api/v2/processos/numero_unico/${encodeURIComponent(valor)}`;
+      } else if (tipo === 'parte') {
+        url = `https://api.escavador.com/api/v2/processos/envolvido?nome=${encodeURIComponent(valor)}&page=${pagina}&limit=50`;
       }
-    } else {
-      const items = data.items || data.processos || data.data || [];
-      processos = items.slice(0, 20).map(normalizarProcesso);
-    }
 
-    return res.status(200).json({ processos, total: data.total || processos.length });
+      const response = await fetch(url, { headers });
+      if (!response.ok) {
+        const errText = await response.text();
+        return res.status(response.status).json({ error: `Escavador: ${response.status} — ${errText}` });
+      }
+
+      const data = await response.json();
+
+      if (tipo === 'numero') {
+        if (data && data.numero_unico) todosProcessos = [normalizarProcesso(data)];
+        break;
+      }
+
+      const items = data.items || data.processos || data.data || [];
+      todosProcessos = [...todosProcessos, ...items.map(normalizarProcesso)];
+
+      const total = data.total || data.meta?.total || items.length;
+      const porPagina = data.per_page || data.meta?.per_page || 50;
+      totalPaginas = Math.ceil(total / porPagina);
+
+      if (pagina >= Math.min(totalPaginas, 5)) break;
+      pagina++;
+
+    } while (pagina <= totalPaginas);
+
+    return res.status(200).json({ processos: todosProcessos, total: todosProcessos.length });
 
   } catch (e) {
     return res.status(500).json({ error: e.message || 'Erro interno' });
@@ -96,10 +100,7 @@ function normalizarProcesso(p) {
       ? `${ultimaMov.data || ''} — ${ultimaMov.tipo || ultimaMov.descricao || ''}`
       : p.ultima_movimentacao || '—',
     data_ajuizamento: p.data_inicio || p.data_ajuizamento || '—',
-    partes: {
-      polo_ativo: autor.nome || '—',
-      polo_passivo: reu.nome || '—',
-    },
+    partes: { polo_ativo: autor.nome || '—', polo_passivo: reu.nome || '—' },
     advogado: advogados,
     valor_causa: p.valor_causa
       ? 'R$ ' + parseFloat(p.valor_causa).toLocaleString('pt-BR', { minimumFractionDigits: 2 })
@@ -107,6 +108,3 @@ function normalizarProcesso(p) {
     proximo_prazo: null,
   };
 }
-```
-
-Cole no GitHub, clique **Commit changes** e me avisa!
