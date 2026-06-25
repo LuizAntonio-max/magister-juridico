@@ -1,5 +1,8 @@
+Aqui está o conteúdo completo do `buscar.js` — selecione tudo e copie:
+
+```javascript
 // Vercel Serverless Function — /api/buscar.js
-// A API Key fica segura na variável de ambiente do servidor, nunca exposta no HTML
+// Integração real com Escavador API
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -8,47 +11,102 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Método não permitido' });
 
-  const { tipo, valor, uf, label } = req.body;
+  const { tipo, valor, uf } = req.body;
   if (!valor) return res.status(400).json({ error: 'Parâmetro obrigatório: valor' });
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: 'API Key não configurada no servidor' });
+  const token = process.env.ESCAVADOR_TOKEN;
+  if (!token) return res.status(500).json({ error: 'Token do Escavador não configurado' });
 
-  const prompt = `Você é um assistente jurídico brasileiro especializado em processos judiciais.
-Busca: ${label} (tipo: ${tipo}, valor: ${valor}, UF: ${uf||'SP'})
-Gere dados realistas de processos judiciais brasileiros. O critério buscado deve aparecer nos processos.
-Use tribunais reais (TJSP, TRT2, TRF3, STJ). Retorne SOMENTE JSON válido sem markdown:
-{"processos":[{"numero":"formato CNJ","tipo":"tipo da ação","tribunal":"sigla","vara":"nome completo",
-"fase":"fase atual","status":"Em andamento|Aguardando|Encerrado|Suspenso",
-"ultima_movimentacao":"DD/MM/AAAA — descrição","data_ajuizamento":"DD/MM/AAAA",
-"partes":{"polo_ativo":"nome","polo_passivo":"nome"},"advogado":"nome — OAB/UF número",
-"valor_causa":"R$ valor","proximo_prazo":"DD/MM/AAAA ou null"}]}
-Gere entre 2 e 4 processos variados.`;
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
+  };
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1500,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err.error?.message || `HTTP ${response.status}`);
+    let url = '';
+
+    if (tipo === 'oab') {
+      url = `https://api.escavador.com/api/v2/advogado/processos?oab_numero=${encodeURIComponent(valor)}&oab_estado=${encodeURIComponent(uf || 'SP')}`;
+    } else if (tipo === 'advogado') {
+      url = `https://api.escavador.com/api/v2/advogado/processos?nome=${encodeURIComponent(valor)}`;
+    } else if (tipo === 'numero') {
+      url = `https://api.escavador.com/api/v2/processos/numero_unico/${encodeURIComponent(valor)}`;
+    } else if (tipo === 'parte') {
+      url = `https://api.escavador.com/api/v2/processos/envolvido?nome=${encodeURIComponent(valor)}`;
+    } else {
+      return res.status(400).json({ error: 'Tipo de busca inválido' });
     }
+
+    const response = await fetch(url, { headers });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      return res.status(response.status).json({ error: `Escavador: ${response.status} — ${errText}` });
+    }
+
     const data = await response.json();
-    if (data.error) throw new Error(data.error.message);
-    const text = data.content.map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(text);
-    return res.status(200).json(parsed);
+
+    let processos = [];
+
+    if (tipo === 'numero') {
+      if (data && data.numero_unico) {
+        processos = [normalizarProcesso(data)];
+      }
+    } else {
+      const items = data.items || data.processos || data.data || [];
+      processos = items.slice(0, 20).map(normalizarProcesso);
+    }
+
+    return res.status(200).json({ processos, total: data.total || processos.length });
+
   } catch (e) {
     return res.status(500).json({ error: e.message || 'Erro interno' });
   }
 }
+
+function normalizarProcesso(p) {
+  const partes = p.partes || p.envolvidos || [];
+  const autor = partes.find(x =>
+    (x.tipo_parte || x.polo || '').toLowerCase().includes('ativo') ||
+    (x.tipo_parte || x.polo || '').toLowerCase().includes('autor') ||
+    (x.tipo_parte || x.polo || '').toLowerCase().includes('requerente')
+  ) || partes[0] || {};
+  const reu = partes.find(x =>
+    (x.tipo_parte || x.polo || '').toLowerCase().includes('passivo') ||
+    (x.tipo_parte || x.polo || '').toLowerCase().includes('réu') ||
+    (x.tipo_parte || x.polo || '').toLowerCase().includes('requerido')
+  ) || partes[1] || {};
+
+  const advogados = partes
+    .filter(x => (x.tipo_participacao || '').toLowerCase().includes('advogado'))
+    .map(x => `${x.nome} — OAB/${x.oab_estado || ''} ${x.oab_numero || ''}`)
+    .join(', ') || p.advogados?.map(a => `${a.nome} — OAB/${a.oab_estado || ''} ${a.oab_numero || ''}`).join(', ') || '—';
+
+  const ultimaMov = (p.movimentacoes || p.ultimas_movimentacoes || [])[0];
+
+  return {
+    numero: p.numero_unico || p.numero || '—',
+    tipo: p.classe || p.tipo || p.assunto || '—',
+    tribunal: p.tribunal?.sigla || p.tribunal || p.orgao_julgador || '—',
+    vara: p.vara || p.orgao || p.tribunal?.nome || '—',
+    fase: p.fase_atual || p.fase || p.situacao || '—',
+    status: p.situacao || p.status || 'Em andamento',
+    ultima_movimentacao: ultimaMov
+      ? `${ultimaMov.data || ''} — ${ultimaMov.tipo || ultimaMov.descricao || ''}`
+      : p.ultima_movimentacao || '—',
+    data_ajuizamento: p.data_inicio || p.data_ajuizamento || '—',
+    partes: {
+      polo_ativo: autor.nome || '—',
+      polo_passivo: reu.nome || '—',
+    },
+    advogado: advogados,
+    valor_causa: p.valor_causa
+      ? 'R$ ' + parseFloat(p.valor_causa).toLocaleString('pt-BR', { minimumFractionDigits: 2 })
+      : '—',
+    proximo_prazo: null,
+  };
+}
+```
+
+Cole no GitHub, clique **Commit changes** e me avisa!
